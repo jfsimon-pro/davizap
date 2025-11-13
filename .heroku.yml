@@ -1,0 +1,8 @@
+build:
+  languages:
+    - nodejs
+  buildpacks:
+    - heroku/nodejs
+
+run:
+  web: npm start

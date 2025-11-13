@@ -1,0 +1,483 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+  // Disable Prisma query logging in production
+  // Only log errors and warnings in production
+}
+
+// Configure logging levels
+// Remove "query" from log levels to disable query logging
+// This reduces noise in production logs
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// -------------------------
+// ENUMS
+// -------------------------
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  AGENT
+  VIEWER
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum MessageType {
+  TEXT
+  TEMPLATE
+  IMAGE
+  DOCUMENT
+  AUDIO
+  VIDEO
+  STICKER
+  LOCATION
+  CONTACTS
+  INTERACTIVE
+}
+
+enum DeliveryStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+enum ConversationStatus {
+  OPEN
+  PENDING_HUMAN
+  IN_ASSISTANT
+  RESOLVED
+  ARCHIVED
+}
+
+enum TemplateCategory {
+  UTILITY
+  MARKETING
+  AUTHENTICATION
+}
+
+enum TemplateStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  REJECTED
+  DEPRECATED
+}
+
+enum HandoffReason {
+  LOW_CONFIDENCE
+  SENSITIVE_TOPIC
+  USER_REQUESTED
+  POLICY_BLOCK
+}
+
+// -------------------------
+// CORE — TENANCY & USERS
+// -------------------------
+
+model Tenant {
+  id                 String                 @id @default(cuid())
+  name               String
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+
+  users              User[]
+  whatsappConfigs    WhatsAppIntegration[]
+  contacts           Contact[]
+  conversations      Conversation[]
+  templates          Template[]
+  campaigns          BroadcastCampaign[]
+  knowledgeSources   KnowledgeSource[]
+  promptProfiles     PromptProfile[]
+  auditLogs          AuditLog[]
+}
+
+model User {
+  id         String   @id @default(cuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  name       String
+  email      String
+  password   String
+  role       UserRole
+  active     Boolean  @default(true)
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  conversationsOwned Conversation[] @relation("ConversationOwner")
+  humanHandoffs HumanHandoff[] @relation("HandoffAssignee")
+  auditLogs AuditLog[] @relation("AuditActor")
+
+  @@unique([tenantId, email])
+}
+
+// -------------------------
+// WHATSAPP CLOUD INTEGRATION
+// -------------------------
+
+model WhatsAppIntegration {
+  id              String   @id @default(cuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  wabaId          String
+  phoneNumberId   String
+  displayPhone    String?
+
+  verifyToken     String
+  accessToken     String
+  webhookEnabled  Boolean  @default(false)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([tenantId, phoneNumberId])
+}
+
+// -------------------------
+// CONTACTS & CONSENT
+// -------------------------
+
+model Contact {
+  id             String   @id @default(cuid())
+  tenantId       String
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  waId           String?
+  phoneE164      String
+  name           String?
+  tags           String[]
+
+  optIn          Boolean  @default(false)
+  optOut         Boolean  @default(false)
+  consentSource  String?
+  consentAt      DateTime?
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  conversations  Conversation[]
+  broadcastItems BroadcastItem[]
+
+  @@unique([tenantId, phoneE164])
+}
+
+// -------------------------
+// CONVERSATIONS, MESSAGES & INDEXAÇÃO
+// -------------------------
+
+model Conversation {
+  id                 String            @id @default(cuid())
+  tenantId           String
+  tenant             Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  contactId          String
+  contact            Contact           @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  status             ConversationStatus @default(OPEN)
+  lastAgentId        String?
+  lastAgent          User?             @relation("ConversationOwner", fields: [lastAgentId], references: [id])
+
+  lastInboundAt      DateTime?
+  lastOutboundAt     DateTime?
+
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  messages           Message[]
+  summaries          ConversationSummary[]
+  handoffs           HumanHandoff[]
+
+  @@index([tenantId, contactId])
+}
+
+model Message {
+  id               String           @id @default(cuid())
+  tenantId         String
+
+  conversationId   String
+  conversation     Conversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  direction        MessageDirection
+  type             MessageType
+  status           DeliveryStatus   @default(QUEUED)
+
+  waMessageId      String?          @unique
+  body             String?
+  data             Json?
+
+  mediaUrl         String?
+  mediaMime        String?
+  mediaSha256      String?
+
+  generatedByAI    Boolean          @default(false)
+  aiTraceId        String?
+
+  createdAt        DateTime         @default(now())
+
+  embeddings       MessageEmbedding[]
+
+  @@index([tenantId, conversationId])
+  @@index([createdAt])
+}
+
+model ConversationSummary {
+  id               String     @id @default(cuid())
+  tenantId         String
+
+  conversationId   String
+  conversation     Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  version          Int        @default(1)
+  content          String
+
+  createdAt        DateTime   @default(now())
+
+  @@unique([conversationId, version])
+}
+
+model MessageEmbedding {
+  id             String   @id @default(cuid())
+  tenantId       String
+
+  messageId      String
+  message        Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  chunkIndex     Int      @default(0)
+  text           String
+  embedding      String   // Store as JSON string for now, can be pgvector later
+
+  createdAt      DateTime @default(now())
+
+  @@unique([messageId, chunkIndex])
+  @@index([tenantId])
+}
+
+// -------------------------
+// IA — PERFIS, CONHECIMENTO E TRILHAS
+// -------------------------
+
+model PromptProfile {
+  id           String   @id @default(cuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  name         String
+  systemPrompt String
+  language     String   @default("pt-BR")
+  policyJson   Json?
+
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model KnowledgeSource {
+  id           String   @id @default(cuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  title        String
+  type         String
+  url          String?
+  version      String?
+  expiresAt    DateTime?
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  chunks       KnowledgeChunk[]
+}
+
+model KnowledgeChunk {
+  id             String   @id @default(cuid())
+  tenantId       String
+
+  sourceId       String
+  source         KnowledgeSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  ordinal        Int
+  text           String
+  embedding      String   // Store as JSON string
+  meta           Json?
+
+  createdAt      DateTime @default(now())
+
+  @@unique([sourceId, ordinal])
+  @@index([tenantId])
+}
+
+model AITrace {
+  id              String   @id @default(cuid())
+  tenantId        String
+
+  messageId       String?
+  conversationId  String?
+
+  model           String
+  promptProfileId String?
+  retrievedIds    String[]
+  promptTokens    Int?
+  completionTokens Int?
+  totalTokens     Int?
+  latencyMs       Int?
+  confidence      Float?
+  decision        String?
+  error           String?
+
+  createdAt       DateTime @default(now())
+
+  @@index([tenantId, conversationId])
+}
+
+// -------------------------
+// TEMPLATES (Meta Message Templates)
+// -------------------------
+
+model Template {
+  id            String   @id @default(cuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  name          String
+  language      String
+  category      TemplateCategory
+  status        TemplateStatus @default(DRAFT)
+
+  headerJson    Json?
+  bodyText      String?
+  footerText    String?
+  buttonsJson   Json?
+
+  metaTemplateId String?
+  lastSubmittedAt DateTime?
+  lastReviewedAt  DateTime?
+  rejectionReason String?
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  submissions   TemplateSubmission[]
+  campaigns     BroadcastCampaign[]
+
+  @@unique([tenantId, name, language])
+}
+
+model TemplateSubmission {
+  id           String   @id @default(cuid())
+  tenantId     String
+
+  templateId   String
+  template     Template @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  payload      Json
+  status       TemplateStatus
+  reason       String?
+  createdAt    DateTime @default(now())
+}
+
+// -------------------------
+// CAMPANHAS (Disparo em Massa)
+// -------------------------
+
+model BroadcastCampaign {
+  id            String   @id @default(cuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  name          String
+  templateId    String
+  template      Template @relation(fields: [templateId], references: [id], onDelete: Restrict)
+
+  fileUrl       String?
+  mappingJson   Json?
+  scheduledAt   DateTime?
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  totalPlanned  Int      @default(0)
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  items         BroadcastItem[]
+}
+
+model BroadcastItem {
+  id             String   @id @default(cuid())
+  tenantId       String
+
+  campaignId     String
+  campaign       BroadcastCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  contactId      String?
+  contact        Contact? @relation(fields: [contactId], references: [id])
+
+  phoneE164      String
+  variables      Json?
+  status         DeliveryStatus @default(QUEUED)
+  error          String?
+
+  waMessageId    String?
+  sentAt         DateTime?
+  deliveredAt    DateTime?
+  readAt         DateTime?
+
+  createdAt      DateTime @default(now())
+
+  @@index([tenantId, campaignId])
+}
+
+// -------------------------
+// HANDOFF HUMANO & FILAS
+// -------------------------
+
+model HumanHandoff {
+  id              String   @id @default(cuid())
+  tenantId        String
+
+  conversationId  String
+  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  reason          HandoffReason
+  note            String?
+  assignedToId    String?
+  assignedTo      User?    @relation("HandoffAssignee", fields: [assignedToId], references: [id])
+  resolvedAt      DateTime?
+  createdAt       DateTime @default(now())
+
+  @@index([tenantId, conversationId])
+}
+
+// -------------------------
+// AUDITORIA & LOGS
+// -------------------------
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  actorId     String?
+  actor       User?    @relation("AuditActor", fields: [actorId], references: [id])
+
+  action      String
+  targetType  String
+  targetId    String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  @@index([tenantId, targetType])
+}
